@@ -1,0 +1,38 @@
+name: CI - Verificação Contínua
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    name: Lint, Typecheck e Validação de Schema
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: "npm"
+
+      - name: Instalar dependências
+        run: npm ci
+
+      - name: Validar Prisma Schema
+        run: npx prisma validate
+
+      - name: Gerar Prisma Client
+        run: npx prisma generate
+
+      - name: Verificação de Tipos TypeScript
+        run: npx tsc --noEmit
+
+      - name: Linting ESLint
+        run: npm run lint
+

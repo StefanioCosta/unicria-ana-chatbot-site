@@ -1,0 +1,213 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// SaaS "Ana" — Multi-tenant (cada lojista = 1 tenant)
+// ─────────────────────────────────────────────────────────────
+
+model Tenant {
+  id            String   @id @default(cuid())
+  name          String
+  slug          String   @unique
+  plan          String   @default("trial") // trial | ativo | suspenso
+  planPaidUntil DateTime?
+
+  // Bot / Ana
+  botEnabled  Boolean @default(true)
+  botNumber   String? // número do WhatsApp do bot
+  anaPrompt   String  @default("")
+  knowledge   String  @default("") // base de conhecimento: pagamentos, entregas, políticas
+  openHour    Int     @default(7)
+  closeHour   Int     @default(19)
+
+  // WhatsApp (Cloud API ou UAZAPI)
+  whatsappProvider   String  @default("cloud_api") // cloud_api | uazapi | nenhum
+  whatsappPhoneId    String? // Phone Number ID (Meta)
+  whatsappToken      String? // Access Token (Meta) ou Token da instância UAZAPI
+  whatsappVerifyTok  String  @default("unicria-verify-2026")
+  uazapiUrl          String? // ex: https://api.uazapi.com
+
+  // Kikolo Online (automação Playwright)
+  kikoloUrl      String? // URL da página de login
+  kikoloEmail    String?
+  kikoloPassword String? // (em produção: encriptar com AES-256)
+  kikoloState    String? // storageState JSON do Playwright (sessão guardada)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users            User[]
+  products         Product[]
+  conversations    Conversation[]
+  sales            Sale[]
+  auditLogs        AuditLog[]
+  secretReferences SecretReference[]
+  sessionLogs      SessionLog[]
+}
+
+model User {
+  id           String   @id @default(cuid())
+  tenantId     String
+  email        String   @unique
+  passwordHash String // scrypt$...; hashes SHA-256 antigos são migrados no login
+  salt         String
+  name         String
+  role         String   @default("owner") // owner | admin | atendente | viewer
+  createdAt    DateTime @default(now())
+
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  auditLogs   AuditLog[]
+  sessionLogs SessionLog[]
+
+  @@index([tenantId])
+}
+
+model Product {
+  id          String   @id @default(cuid())
+  tenantId    String
+  name        String
+  kikoloUrl   String? // link do produto na Kikolo Online
+  priceKz     Float? // null = sob consulta
+  description String?
+  benefits    String?
+  usage       String? // como usar
+  image       String?
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, active])
+}
+
+model Conversation {
+  id            String   @id @default(cuid())
+  tenantId      String
+  customerName  String?
+  customerPhone String
+  status        String   @default("aberta") // aberta | agendada | perdida | humana
+  source        String   @default("simulador") // whatsapp | simulador
+  lastMessageAt DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  messages  Message[]
+  sales     Sale[]
+
+  @@unique([tenantId, customerPhone, source])
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, lastMessageAt])
+}
+
+model Message {
+  id             String   @id @default(cuid())
+  conversationId String
+  role           String // cliente | ana | humano
+  content        String
+  createdAt      DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+}
+
+model Sale {
+  id             String   @id @default(cuid())
+  tenantId       String
+  conversationId String?
+  customerName   String
+  customerPhone  String
+  customerAddr   String?
+  productName    String
+  valueKz        Float
+  status         String   @default("fechada") // fechada | perdida | agendada
+  lossReason     String?
+  kikoloStatus   String   @default("pendente") // pendente | agendado | erro
+  kikoloProtocol String?
+  createdAt      DateTime @default(now())
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, createdAt])
+  @@index([tenantId, kikoloStatus])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Novos modelos de produção
+// ─────────────────────────────────────────────────────────────
+
+/// Registo de auditoria — rastreia alterações sensíveis (dados de tenant,
+/// credenciais, planos, etc.). Append-only — nunca apagar registos.
+model AuditLog {
+  id        String   @id @default(cuid())
+  tenantId  String
+  userId    String?  // null se a acção foi automática (sistema/cron)
+  action    String   // ex: "tenant.update", "user.create", "secret.rotate"
+  entity    String   // nome do modelo afectado (Tenant, User, Sale…)
+  entityId  String   // id do registo afectado
+  before    String?  // JSON snapshot antes da alteração (se aplicável)
+  after     String?  // JSON snapshot depois da alteração (se aplicável)
+  ipAddress String?  // IP de origem da acção
+  userAgent String?  // user-agent do pedido HTTP
+  createdAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([tenantId, createdAt])
+  @@index([tenantId, action])
+  @@index([userId])
+  @@index([entity, entityId])
+}
+
+/// Referências a segredos armazenados de forma segura (e.g. cofre externo,
+/// variáveis de ambiente encriptadas). Nunca guarda o valor real do segredo.
+model SecretReference {
+  id        String   @id @default(cuid())
+  tenantId  String
+  name      String   // identificador legível: "whatsappToken", "kikoloPassword"
+  provider  String   @default("env") // env | vault | gcp_sm | aws_sm
+  ref       String   // referência opaca: nome da env var, path no cofre, ARN, etc.
+  version   String?  // versão do segredo (para rotação)
+  rotatedAt DateTime? // última rotação
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+/// Registo de sessões de autenticação — login, logout, falhas, tokens
+/// revogados. Usado para detecção de anomalias e conformidade de segurança.
+model SessionLog {
+  id        String   @id @default(cuid())
+  tenantId  String
+  userId    String?  // null se login falhou (utilizador não encontrado)
+  event     String   // login_success | login_fail | logout | token_refresh | password_reset
+  ipAddress String?
+  userAgent String?
+  meta      String?  // JSON com detalhes extra (ex: motivo de falha, provider OAuth)
+  createdAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user   User?  @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([tenantId, createdAt])
+  @@index([userId])
+  @@index([event])
+}

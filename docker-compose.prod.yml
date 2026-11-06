@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: unicria-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-unicria_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-unicria_secret_password}
+      POSTGRES_DB: ${POSTGRES_DB:-unicria_prod}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-unicria_user} -d ${POSTGRES_DB:-unicria_prod}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - unicria-net
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: unicria-ana-app
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env.production
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-unicria_user}:${POSTGRES_PASSWORD:-unicria_secret_password}@postgres:5432/${POSTGRES_DB:-unicria_prod}?schema=public
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    networks:
+      - unicria-net
+
+volumes:
+  pgdata:
+    driver: local
+
+networks:
+  unicria-net:
+    driver: bridge
+
